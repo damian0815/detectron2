@@ -1,5 +1,7 @@
 # Copyright (c) Facebook, Inc. and its affiliates.
 import logging
+import os
+
 import numpy as np
 from typing import List, Optional, Tuple
 import cv2
@@ -69,7 +71,26 @@ class DensePoseMaskedColormapResultsVisualizer(DensePoseResultsVisualizer):
         matrix = self.data_extractor(iuv_arr)
         segm = self.segm_extractor(iuv_arr)
         mask = np.zeros(matrix.shape, dtype=np.uint8)
-        mask[segm > 0] = 1
+        if "DENSEPOSE_LABEL_INDEX" in os.environ.keys():
+            label_index = int(os.environ["DENSEPOSE_LABEL_INDEX"])
+            #u = _extract_u_from_iuvarr(iuv_arr)
+            #v = _extract_v_from_iuvarr(iuv_arr)
+            mask_label = np.zeros(matrix.shape, dtype=np.uint8)
+            mask_label[segm == label_index] = 1
+            mask_ulow = np.zeros(matrix.shape, dtype=np.uint8)
+            mask_uhigh = np.zeros(matrix.shape, dtype=np.uint8)
+            #mask_ulow[u > 136] = 1
+            #mask_uhigh[u < 160] = 1
+            #mask_u = mask_ulow * mask_uhigh
+            #mask_vlow = np.zeros(matrix.shape, dtype=np.uint8)
+            #mask_vhigh = np.zeros(matrix.shape, dtype=np.uint8)
+            #mask_vlow[v < 92] = 1
+            #mask_vhigh[v > 156] = 1
+            #mask_v = np.bitwise_or(mask_vlow, mask_vhigh)
+            #mask = mask_label * mask_u * mask_v
+            mask = mask_label
+        else:
+            mask[segm > 0] = 1
         image_bgr = self.mask_visualizer.visualize(image_bgr, mask, matrix, bbox_xywh)
 
 

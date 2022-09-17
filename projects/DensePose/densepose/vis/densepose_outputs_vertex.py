@@ -44,7 +44,7 @@ class DensePoseOutputsVertexVisualizer(object):
         inplace=True,
         cmap=cv2.COLORMAP_JET,
         alpha=0.7,
-        device="cuda",
+        device="cpu",
         default_class=0,
         **kwargs,
     ):
@@ -127,6 +127,67 @@ class DensePoseOutputsVertexVisualizer(object):
 
         return S, E, N, bboxes_xywh, pred_classes
 
+
+class DensePoseOutputsVertexAnnotatedVisualizer(DensePoseOutputsVertexVisualizer):
+
+    def visualize(
+            self,
+            image_bgr: Image,
+            outputs_boxes_xywh_classes: Tuple[
+                Optional[DensePoseEmbeddingPredictorOutput], Optional[Boxes], Optional[List[int]]
+            ],
+    ) -> Image:
+        if outputs_boxes_xywh_classes[0] is None:
+            return image_bgr
+
+        S, E, N, bboxes_xywh, pred_classes = self.extract_and_check_outputs_and_boxes(
+            outputs_boxes_xywh_classes
+        )
+
+        # restrict to original smpl_6980 mesh vertices rather than the 4-subdivided smpl_27554
+        truncate_vertex_index = 6980
+
+        areas = bboxes_xywh[:, 2] * bboxes_xywh[:, 3]
+        best_area_index = areas.argmax()
+        # for n in range(N):
+        for n_ in [best_area_index]:
+            n = n_.item()
+            x, y, w, h = bboxes_xywh[n].int().tolist()
+            mesh_name = self.class_to_mesh_name[pred_classes[n]]
+            mesh_vertex_embeddings = self.mesh_vertex_embeddings[mesh_name]
+            if truncate_vertex_index is not None:
+                mesh_vertex_embeddings = mesh_vertex_embeddings[:truncate_vertex_index]
+            closest_vertices, mask = get_closest_vertices_mask_from_ES(
+                E[[n]],
+                S[[n]],
+                h,
+                w,
+                mesh_vertex_embeddings,
+                self.device,
+            )
+            embed_map = get_xyz_vertex_embedding(mesh_name, self.device)
+            vis = (embed_map[closest_vertices].clip(0, 1) * 255.0).cpu().numpy()
+            # to find all indices where any element of A appears in B:
+            # mask = np.isin(A, B) # [[ True/False ... ]]
+            # indices = np.nonzero(mask)
+            # -> torch.nonzero(torch.isin(closest_vertices, vertices_to_find))
+
+            mask_numpy = mask.cpu().numpy().astype(dtype=np.uint8)
+            image_bgr = self.mask_visualizer.visualize(image_bgr, mask_numpy, vis, [x, y, w, h])
+            # every nth pixel draw the closest vertex
+            annotate_stride_y = 20
+            annotate_stride_x = 40
+            every_nth_pixel = torch.zeros_like(mask)
+            every_nth_pixel[::annotate_stride_y, ::annotate_stride_x] = 1
+            locations_to_annotate = torch.nonzero(mask * every_nth_pixel).tolist()
+            for loc in locations_to_annotate:
+                vertex_index = closest_vertices[loc[0], loc[1]]
+                pixel_pos = tuple((x + loc[1], y + loc[0]))
+                cv2.circle(image_bgr, pixel_pos, 1, color=(64, 64, 64))
+                cv2.putText(image_bgr, str(vertex_index.item()), pixel_pos, cv2.FONT_HERSHEY_SIMPLEX, fontScale=0.4,
+                            color=(255, 0, 0))
+
+        return image_bgr
 
 def get_texture_atlases(json_str: Optional[str]) -> Optional[Dict[str, Optional[np.ndarray]]]:
     """

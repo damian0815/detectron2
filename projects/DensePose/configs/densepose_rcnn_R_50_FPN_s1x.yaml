@@ -1,8 +1,10 @@
 _BASE_: "Base-DensePose-RCNN-FPN.yaml"
 MODEL:
   WEIGHTS: "detectron2://ImageNetPretrained/MSRA/R-50.pkl"
+  #WEIGHTS: "densepose_rcnn_R_50_FPN_s1x-c4ea5f.pkl"
   RESNETS:
     DEPTH: 50
+  DEVICE: "cpu"
 SOLVER:
   MAX_ITER: 130000
   STEPS: (100000, 120000)

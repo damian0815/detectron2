@@ -7,6 +7,7 @@ MODEL:
     NAME: "DensePoseV1ConvXHead"
     CSE:
       EMBED_LOSS_NAME: "EmbeddingLoss"
+  DEVICE: "cpu"
 SOLVER:
   MAX_ITER: 130000
   STEPS: (100000, 120000)

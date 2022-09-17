@@ -3,16 +3,21 @@
 
 import argparse
 import glob
+import json
 import logging
 import os
 import pickle
 import sys
 from typing import Any, ClassVar, Dict, List
+
+import cv2
+import numpy as np
 import torch
 
 from detectron2.config import CfgNode, get_cfg
 from detectron2.data.detection_utils import read_image
 from detectron2.engine.defaults import DefaultPredictor
+from detectron2.structures import BoxMode
 from detectron2.structures.instances import Instances
 from detectron2.utils.logger import setup_logger
 
@@ -20,11 +25,11 @@ from densepose import add_densepose_config
 from densepose.structures import DensePoseChartPredictorOutput, DensePoseEmbeddingPredictorOutput
 from densepose.utils.logger import verbosity_to_level
 from densepose.vis.base import CompoundVisualizer
-from densepose.vis.bounding_box import ScoredBoundingBoxVisualizer
+from densepose.vis.bounding_box import ScoredBoundingBoxVisualizer, BoundingBoxVisualizer
 from densepose.vis.densepose_outputs_vertex import (
     DensePoseOutputsTextureVisualizer,
     DensePoseOutputsVertexVisualizer,
-    get_texture_atlases,
+    get_texture_atlases, DensePoseOutputsVertexAnnotatedVisualizer,
 )
 from densepose.vis.densepose_results import (
     DensePoseResultsContourVisualizer,
@@ -42,6 +47,9 @@ from densepose.vis.extractor import (
     DensePoseResultExtractor,
     create_extractor,
 )
+
+from densepose.vis.detection_rects_wrangler import DetectionRectsWranglerCSE, DetectionRectsWranglerIUV
+from densepose.vis.detection_rects_config_parser import DetectionRectsConfigParser
 
 DOC = """Apply Net - a tool to print / visualize DensePose results
 """
@@ -85,6 +93,13 @@ class InferenceAction(Action):
             default=[],
             nargs=argparse.REMAINDER,
         )
+        parser.add_argument(
+            "--is_video",
+            help="Input is a video",
+            default=False,
+            action="store_true"
+        )
+
 
     @classmethod
     def execute(cls: type, args: argparse.Namespace):
@@ -99,11 +114,32 @@ class InferenceAction(Action):
             logger.warning(f"No input images for {args.input}")
             return
         context = cls.create_context(args, cfg)
-        for file_name in file_list:
-            img = read_image(file_name, format="BGR")  # predictor expects BGR image.
-            with torch.no_grad():
-                outputs = predictor(img)["instances"]
-                cls.execute_on_outputs(context, {"file_name": file_name, "image": img}, outputs)
+        if args.is_video:
+            video_path = file_list[0]
+            video = cv2.VideoCapture(video_path)
+            frame_index = 0
+            frame_interval = 7
+            while video.isOpened():
+                success, img = video.read()
+                frame_index += 1
+                if not success:
+                    break
+                with torch.no_grad():
+                    outputs = predictor(img)["instances"]
+                    cls.execute_on_outputs(context, {"file_name": video_path, "image": img, "frame_number": frame_index}, outputs)
+                    for i in range(frame_interval-1):
+                        _, frame = video.read()
+                        frame_index += 1
+        else:
+            for file_name in file_list:
+                try:
+                    img = read_image(file_name, format="BGR")  # predictor expects BGR image.
+                except Exception as e:
+                    print(e)
+                    continue
+                with torch.no_grad():
+                    outputs = predictor(img)["instances"]
+                    cls.execute_on_outputs(context, {"file_name": file_name, "image": img}, outputs)
         cls.postexecute(context)
 
     @classmethod
@@ -193,6 +229,128 @@ class DumpAction(InferenceAction):
             pickle.dump(context["results"], hFile)
             logger.info(f"Output saved to {out_fname}")
 
+@register_action
+class WriteRectsAction(InferenceAction):
+    """
+    Make detection rects and write to json
+    """
+    COMMAND: ClassVar[str] = "write_rects"
+
+    @classmethod
+    def add_parser(cls: type, subparsers: argparse._SubParsersAction):
+        parser = subparsers.add_parser(cls.COMMAND, help="Make detection rects from model outputs and write to json file.")
+        cls.add_arguments(parser)
+        parser.set_defaults(func=cls.execute)
+
+    @classmethod
+    def add_arguments(cls: type, parser: argparse.ArgumentParser):
+        super(WriteRectsAction, cls).add_arguments(parser)
+        parser.add_argument(
+            "detector_type",
+            metavar="<detector type>",
+            help="Detector type. Possible values are \"iuv\" (chart-based) or \"cse\"."
+        )
+        parser.add_argument(
+            "--output",
+            metavar="<result_file>",
+            default="make.json",
+            help="File name to save rects to",
+        )
+        parser.add_argument(
+            "--rects_config",
+            metavar="<detection_rects_config_file>",
+            default="detectionRectsConfig.yml",
+            help="YAML file that describes how to make detection rects from labels and U/V data"
+        )
+
+    @classmethod
+    def setup_config(
+        cls: type, config_fpath: str, model_fpath: str, args: argparse.Namespace, opts: List[str]
+    ):
+        opts.append("MODEL.ROI_HEADS.SCORE_THRESH_TEST")
+        opts.append(str(args.min_score))
+        if args.nms_thresh is not None:
+            opts.append("MODEL.ROI_HEADS.NMS_THRESH_TEST")
+            opts.append(str(args.nms_thresh))
+        cfg = super(ShowAction, cls).setup_config(config_fpath, model_fpath, args, opts)
+        return cfg
+
+    @classmethod
+    def execute_on_outputs(
+        cls: type, context: Dict[str, Any], entry: Dict[str, Any], outputs: Instances
+    ):
+        image_fpath = entry["file_name"]
+        logger.info(f"Processing {image_fpath}")
+        result = {"file_name": image_fpath}
+        if outputs.has("scores"):
+            result["scores"] = outputs.get("scores").cpu()
+        if outputs.has("pred_boxes"):
+            result["pred_boxes_XYXY"] = outputs.get("pred_boxes").tensor.cpu()
+            if outputs.has("pred_densepose"):
+                wrangler = context["wrangler"]
+                result["detection_rects"] = wrangler.wrangle(outputs)
+        context["results"].append(result)
+
+        if "detection_rects" in result.keys():
+            wrangler_results = result["detection_rects"]
+            bbvis = BoundingBoxVisualizer()
+            image = cv2.cvtColor(entry["image"], cv2.COLOR_BGR2GRAY)
+            image = np.tile(image[:, :, np.newaxis], [1, 1, 3])
+            bboxes_xywh = list(map(lambda x: BoxMode.convert(x["bbox_xyxy"], BoxMode.XYXY_ABS, BoxMode.XYWH_ABS), wrangler_results))
+            image_vis = bbvis.visualize(image, bboxes_xywh)
+
+            entry_idx = context["entry_idx"] + 1
+            out_fname = cls._get_out_fname(entry_idx, "/tmp/wrangler-test.png")
+            out_dir = os.path.dirname(out_fname)
+            if len(out_dir) > 0 and not os.path.exists(out_dir):
+                os.makedirs(out_dir)
+            cv2.imwrite(out_fname, image_vis)
+            print("wrote to", out_fname)
+        context["entry_idx"] += 1
+
+    @classmethod
+    def _get_out_fname(cls: type, entry_idx: int, fname_base: str):
+        base, ext = os.path.splitext(fname_base)
+        return base + ".{0:04d}".format(entry_idx) + ext
+
+
+    @classmethod
+    def create_context(cls: type, args: argparse.Namespace, cfg: CfgNode):
+        detection_rects_definitions = DetectionRectsConfigParser.parse(args.rects_config)
+        wrangler = DetectionRectsWranglerIUV(detection_rects_definitions) if args.detector_type == "iuv" else DetectionRectsWranglerCSE(cfg, detection_rects_definitions)
+        context = {"results": [],
+                   "out_fname": args.output,
+                   "wrangler": wrangler,
+                   "entry_idx": 0
+                   }
+        return context
+
+    @classmethod
+    def prepare_for_json(cls: type, object: Dict) -> Dict:
+        result = {}
+        for k, v in object.items():
+            if isinstance(v, torch.Tensor):
+                result[k] = v.tolist()
+            elif isinstance(v, Dict):
+                result[k] = cls.prepare_for_json(v)
+            else:
+                result[k] = v
+        return result
+
+
+
+    @classmethod
+    def postexecute(cls: type, context: Dict[str, Any]):
+        out_fname = context["out_fname"]
+        out_dir = os.path.dirname(out_fname)
+        if len(out_dir) > 0 and not os.path.exists(out_dir):
+            os.makedirs(out_dir)
+        with open(out_fname, "w") as hFile:
+            results = context["results"]
+            results_for_json = cls.prepare_for_json(results[0])
+            json.dump(results_for_json, hFile)
+            logger.info(f"Output saved to {out_fname}")
+
 
 @register_action
 class ShowAction(InferenceAction):
@@ -209,6 +367,7 @@ class ShowAction(InferenceAction):
         "dp_iuv_texture": DensePoseResultsVisualizerWithTexture,
         "dp_cse_texture": DensePoseOutputsTextureVisualizer,
         "dp_vertex": DensePoseOutputsVertexVisualizer,
+        "dp_vertex_SMPL6980_annotations": DensePoseOutputsVertexAnnotatedVisualizer,
         "bbox": ScoredBoundingBoxVisualizer,
     }
 
@@ -312,7 +471,7 @@ class ShowAction(InferenceAction):
             vis = cls.VISUALIZERS[vis_spec](
                 cfg=cfg,
                 texture_atlas=texture_atlas,
-                texture_atlases_dict=texture_atlases_dict,
+                texture_atlases_dict=texture_atlases_dict
             )
             visualizers.append(vis)
             extractor = create_extractor(vis)

@@ -76,7 +76,13 @@ def find_top_rpn_proposals(
         else:
             num_proposals_i = min(Hi_Wi_A, pre_nms_topk)
 
-        topk_scores_i, topk_idx = logits_i.topk(num_proposals_i, dim=1)
+        # mps cannot (yet) do topk with k>=16
+        if num_proposals_i >= 16 and logits_i.device == torch.device('mps:0'):
+            topk_scores_i_cpu, topk_idx_cpu = logits_i.to('cpu').topk(num_proposals_i, dim=1)
+            topk_scores_i = topk_scores_i_cpu.to(logits_i.device)
+            topk_idx = topk_idx_cpu.to(logits_i.device)
+        else:
+            topk_scores_i, topk_idx = logits_i.topk(num_proposals_i, dim=1)
 
         # each is N x topk
         topk_proposals_i = proposals_i[batch_idx[:, None], topk_idx]  # N x topk x 4
