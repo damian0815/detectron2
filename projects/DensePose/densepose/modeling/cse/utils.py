@@ -61,11 +61,19 @@ def get_closest_vertices_mask_from_ES(
         Closest Vertices (tensor [h, w]), int, for every point of the resulting box
         Segmentation mask (tensor [h, w]), boolean, for every point of the resulting box
     """
-    embedding_resized = F.interpolate(E, size=(h, w), mode="bilinear")[0].to(device)
-    coarse_segm_resized = F.interpolate(S, size=(h, w), mode="bilinear")[0].to(device)
-    mask = coarse_segm_resized.argmax(0) > 0
+    embedding_resized = F.interpolate(E, size=(h, w), mode="bilinear")
+    coarse_segm_resized = F.interpolate(S, size=(h, w), mode="bilinear")
+    return get_closest_vertices_mask_from_ES_no_resize(embedding_resized, coarse_segm_resized, mesh_vertex_embeddings, device)
+
+def get_closest_vertices_mask_from_ES_no_resize(
+        embedding: torch.Tensor,
+        coarse_segm: torch.Tensor,
+        mesh_vertex_embeddings: torch.Tensor,
+        device: torch.device,
+):
+    mask = coarse_segm[0].argmax(0) > 0
     closest_vertices = torch.zeros(mask.shape, dtype=torch.long, device=device)
-    all_embeddings = embedding_resized[:, mask].t()
+    all_embeddings = embedding[0][:, mask].t()
     size_chunk = 10_000  # Chunking to avoid possible OOM
     edm = []
     if len(all_embeddings) == 0:

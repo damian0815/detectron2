@@ -129,13 +129,18 @@ class DensePoseOutputsExtractor(object):
         else:
             classes = None
 
+        if instances.has('scores'):
+            scores = instances.scores.tolist()
+        else:
+            scores = None
+
         if select is not None:
             dpout = dpout[select]
             boxes_xyxy = boxes_xyxy[select]
             if classes is not None:
                 classes = classes[select]
 
-        return dpout, boxes_xywh, classes
+        return dpout, boxes_xywh, classes, scores
 
 
 class CompoundExtractor(object):

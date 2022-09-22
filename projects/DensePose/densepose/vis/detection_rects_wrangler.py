@@ -9,7 +9,7 @@ from .densepose_outputs_vertex import get_xyz_vertex_embedding
 from .extractor import DensePoseOutputsExtractor
 from ..data.utils import get_class_to_mesh_name_mapping
 from ..modeling import build_densepose_embedder
-from ..modeling.cse.utils import get_closest_vertices_mask_from_ES
+from ..modeling.cse.utils import get_closest_vertices_mask_from_ES, get_closest_vertices_mask_from_ES_no_resize
 from ..structures import DensePoseChartResult, DensePoseChartResultWithConfidences, DensePoseChartPredictorOutput, \
     DensePoseEmbeddingPredictorOutput
 from .detection_rects_config_parser import DetectionRectsConfig
@@ -86,10 +86,9 @@ class DetectionRectsWranglerIUV:
                 for r in this_rects:
                     rects.append({
                         'label': rect_name,
-                        'bbox_xyxy': r
+                        'score': 1,
+                        'box': r
                     })
-
-
 
         #print("all done",rects)
         return rects
@@ -110,8 +109,10 @@ class DetectionRectsWranglerCSE:
 
         self.class_to_mesh_name = get_class_to_mesh_name_mapping(cfg)
 
+        device = torch.device(cfg.MODEL.DEVICE)
+
         self.mesh_vertex_embeddings = {
-            mesh_name: self.embedder(mesh_name)
+            mesh_name: self.embedder(mesh_name).to(device)
             for mesh_name in self.class_to_mesh_name.values()
             if self.embedder.has_embeddings(mesh_name)
         }
@@ -119,7 +120,7 @@ class DetectionRectsWranglerCSE:
     def wrangle(self, outputs):
 
         extractor = DensePoseOutputsExtractor()
-        outputs, extracted_boxes_xywh, extracted_pred_classes = extractor(outputs)
+        outputs, extracted_boxes_xywh, extracted_pred_classes, scores = extractor(outputs)
 
         S, E, N, bboxes_xywh, pred_classes = self.extract_and_check_outputs_and_boxes(
             outputs, extracted_boxes_xywh, extracted_pred_classes
@@ -137,11 +138,9 @@ class DetectionRectsWranglerCSE:
             mesh_vertex_embeddings = self.mesh_vertex_embeddings[mesh_name]
             if truncate_vertex_index is not None:
                 mesh_vertex_embeddings = mesh_vertex_embeddings[:truncate_vertex_index]
-            closest_vertices, mask = get_closest_vertices_mask_from_ES(
+            closest_vertices, mask = get_closest_vertices_mask_from_ES_no_resize(
                 E[[n]],
                 S[[n]],
-                h,
-                w,
                 mesh_vertex_embeddings,
                 device,
             )
@@ -150,10 +149,10 @@ class DetectionRectsWranglerCSE:
             for group in self.rects_config.smpl_6980_vertex_groups:
                 vertices = group['vertices']
                 name = group['name']
-                selected_vertices_mask = torch.isin(closest_vertices, torch.Tensor(vertices))
+                selected_vertices_mask = torch.isin(closest_vertices, torch.Tensor(vertices).to(device))
                 this_mask = mask * selected_vertices_mask
 
-                this_rects_xyxy_list = find_rects_in_mask(pred_bbox_yxhw, this_mask.unsqueeze(0).to(torch.float16))
+                this_rects_xyxy_list = find_rects_in_mask(pred_bbox_yxhw, this_mask.unsqueeze(0).to(torch.float32))
                 if len(this_rects_xyxy_list) > 0:
                     this_rects_xyxy = torch.Tensor(this_rects_xyxy_list)
                     w = this_rects_xyxy[:, 2] - this_rects_xyxy[:, 0]
@@ -162,7 +161,8 @@ class DetectionRectsWranglerCSE:
                     largest = area.argmax()
                     rects.append({
                         'label': name,
-                        'bbox_xyxy': this_rects_xyxy_list[largest]
+                        'score': scores[n],
+                        'box': this_rects_xyxy_list[largest]
                     })
 
 
@@ -225,12 +225,12 @@ def find_rects_in_mask(pred_bbox_yxhw, mask) -> [list]:
                                                 0, size-mask_tensor_padded.size()[3],
                                                 0, size-mask_tensor_padded.size()[2]
         ))
-    mask_dilated = Dilation2d(1, 1, 5, soft_max=False)(mask_tensor_padded)
-    mask_dilated_eroded = Erosion2d(1, 1, 3, soft_max=False)(mask_dilated)
+    mask_dilated = Dilation2d(1, 1, 5, soft_max=False, device=mask.device)(mask_tensor_padded)
+    mask_dilated_eroded = Erosion2d(1, 1, 3, soft_max=False, device=mask.device)(mask_dilated)
 
     def find_islands(src):
         # https://stackoverflow.com/questions/25664682/how-to-find-cluster-sizes-in-2d-numpy-array
-        islands, num_islands = measurements.label(src[0])
+        islands, num_islands = measurements.label(src[0].to('cpu'))
         result = []
         for island_index in range(1, num_islands + 1):
             coords = np.where(islands == island_index)
@@ -239,7 +239,7 @@ def find_rects_in_mask(pred_bbox_yxhw, mask) -> [list]:
             max_x = np.max(coords[1])
             max_y = np.max(coords[0])
 
-            print("island", island_index, "pixel count", len(coords[0]), "bbox xyxy", str((min_x, min_y, max_x, max_y)))
+            #print("island", island_index, "pixel count", len(coords[0]), "bbox xyxy", str((min_x, min_y, max_x, max_y)))
             result.append([len(coords[0]), min_x, min_y, max_x, max_y])
         return result
 
@@ -256,10 +256,11 @@ def find_rects_in_mask(pred_bbox_yxhw, mask) -> [list]:
         # ignore padding by using mask rather than mask_tensor_padded
         left = pred_bbox_ox + pred_bbox_width * island_bbox_xyxy_relative_to_pred_bbox[0] / mask.shape[2]
         top = pred_bbox_oy + pred_bbox_height * island_bbox_xyxy_relative_to_pred_bbox[1] / mask.shape[1]
-        right = pred_bbox_ox + pred_bbox_width * island_bbox_xyxy_relative_to_pred_bbox[2] / mask.shape[2]
-        bottom = pred_bbox_oy + pred_bbox_height * island_bbox_xyxy_relative_to_pred_bbox[3] / mask.shape[1]
+        right = pred_bbox_ox + pred_bbox_width * (island_bbox_xyxy_relative_to_pred_bbox[2]+1) / mask.shape[2]
+        bottom = pred_bbox_oy + pred_bbox_height * (island_bbox_xyxy_relative_to_pred_bbox[3]+1) / mask.shape[1]
 
         island_bbox_xyxy = [round(left.item()), round(top.item()), round(right.item()), round(bottom.item())]
         rects.append(island_bbox_xyxy)
 
     return rects
+

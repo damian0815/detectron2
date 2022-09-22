@@ -10,7 +10,7 @@ class Morphology(nn.Module):
     Base class for morpholigical operators 
     For now, only supports stride=1, dilation=1, kernel_size H==W, and padding='same'.
     '''
-    def __init__(self, in_channels, out_channels, kernel_size=5, soft_max=True, beta=15, type=None):
+    def __init__(self, in_channels, out_channels, kernel_size=5, soft_max=True, beta=15, device='cpu', type=None):
         '''
         in_channels: scalar
         out_channels: scalar, the number of the morphological neure. 
@@ -27,7 +27,7 @@ class Morphology(nn.Module):
         self.beta = beta
         self.type = type
 
-        self.weight = nn.Parameter(torch.zeros(out_channels, in_channels, kernel_size, kernel_size), requires_grad=True)
+        self.weight = nn.Parameter(torch.zeros(out_channels, in_channels, kernel_size, kernel_size).to(device), requires_grad=True)
         self.unfold = nn.Unfold(kernel_size, dilation=1, padding=0, stride=1)
 
     def forward(self, x):
@@ -68,12 +68,12 @@ class Morphology(nn.Module):
         return x 
 
 class Dilation2d(Morphology):
-    def __init__(self, in_channels, out_channels, kernel_size=5, soft_max=True, beta=20):
-        super(Dilation2d, self).__init__(in_channels, out_channels, kernel_size, soft_max, beta, 'dilation2d')
+    def __init__(self, in_channels, out_channels, kernel_size=5, soft_max=True, beta=20, device='cpu'):
+        super(Dilation2d, self).__init__(in_channels, out_channels, kernel_size, soft_max, beta, device, 'dilation2d')
 
 class Erosion2d(Morphology):
-    def __init__(self, in_channels, out_channels, kernel_size=5, soft_max=True, beta=20):
-        super(Erosion2d, self).__init__(in_channels, out_channels, kernel_size, soft_max, beta, 'erosion2d')
+    def __init__(self, in_channels, out_channels, kernel_size=5, soft_max=True, beta=20, device='cpu'):
+        super(Erosion2d, self).__init__(in_channels, out_channels, kernel_size, soft_max, beta, device, 'erosion2d')
 
 
 

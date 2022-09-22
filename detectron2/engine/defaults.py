@@ -19,6 +19,7 @@ from typing import Optional
 import torch
 from fvcore.nn.precise_bn import get_bn_modules
 from omegaconf import OmegaConf
+from torch.autograd.profiler import record_function
 from torch.nn.parallel import DistributedDataParallel
 
 import detectron2.data.transforms as T
@@ -306,15 +307,47 @@ class DefaultPredictor:
         """
         with torch.no_grad():  # https://github.com/sphinx-doc/sphinx/issues/4258
             # Apply pre-processing to image.
-            if self.input_format == "RGB":
-                # whether the model expects BGR inputs or RGB
-                original_image = original_image[:, :, ::-1]
-            height, width = original_image.shape[:2]
-            image = self.aug.get_transform(original_image).apply_image(original_image)
-            image = torch.as_tensor(image.astype("float32").transpose(2, 0, 1))
+            with record_function("prepare_image"):
+                if self.input_format == "RGB":
+                    # whether the model expects BGR inputs or RGB
+                    original_image = original_image[:, :, ::-1]
+                height, width = original_image.shape[:2]
+                #image = self.aug.get_transform(original_image).apply_image(original_image)
+                #image = torch.as_tensor(image.astype("float32").transpose(2, 0, 1))
+                image = torch.as_tensor(original_image.astype("float32").transpose(2, 0, 1))
 
-            inputs = {"image": image, "height": height, "width": width}
-            predictions = self.model([inputs])[0]
+                inputs = {"image": image, "height": height, "width": width}
+            with record_function("do_inference"):
+                predictions = self.model([inputs])[0]
+            return predictions
+
+
+class BatchPredictor(DefaultPredictor):
+    def __call__(self, batch):
+        """
+        Args:
+            batch (list): list of np.ndarray of shape (H, W, C) (in BGR order).
+
+        Returns:
+            predictions (dict):
+                the output of the model for one image only.
+                See :doc:`/tutorials/models` for details about the format.
+        """
+        with torch.no_grad():  # https://github.com/sphinx-doc/sphinx/issues/4258
+            # Apply pre-processing to image.
+            with record_function("prepare_images"):
+                first_image = batch[0]
+                if self.input_format == "RGB":
+                    # whether the model expects BGR inputs or RGB
+                    original_image = first_image[:, :, ::-1]
+                height, width = first_image.shape[:2]
+                #image = self.aug.get_transform(original_image).apply_image(original_image)
+                #image = torch.as_tensor(image.astype("float32").transpose(2, 0, 1))
+                images = [torch.as_tensor(image.astype("float32").transpose(2, 0, 1)) for image in batch]
+
+                inputs = [{"image": image, "height": height, "width": width} for image in images]
+            with record_function("do_inference"):
+                predictions = self.model(inputs)
             return predictions
 
 

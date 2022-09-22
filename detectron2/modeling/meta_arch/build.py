@@ -23,3 +23,6 @@ def build_model(cfg):
     model.to(torch.device(cfg.MODEL.DEVICE))
     _log_api_usage("modeling.meta_arch." + meta_arch)
     return model
+
+
+# configs/cse/densepose_rcnn_R_50_FPN_s1x.yaml
