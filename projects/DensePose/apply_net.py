@@ -121,7 +121,7 @@ class InferenceAction(Action):
         if args.is_video:
 
             def trace_handler(p):
-                trace_output = p.key_averages().table(sort_by="self_cpu_time_total", row_limit=30)
+                trace_output = p.key_averages().table(sort_by="cpu_time_total", row_limit=30)
                 print(trace_output)
                 p.export_chrome_trace("trace_" + str(p.step_num) + ".json")
 
@@ -164,7 +164,7 @@ class InferenceAction(Action):
 
                 processed_frame_count = 0
                 batched_imgs = []
-                batch_size = 4
+                batch_size = 2
                 while video.isOpened():
                     success, img = video.read()
                     frame_index += 1

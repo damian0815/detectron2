@@ -2,6 +2,7 @@ from typing import Optional, List
 
 import numpy as np
 import torch
+from torch.autograd.profiler import record_function
 from traitlets import Int
 
 from detectron2.structures import Boxes, BoxMode
@@ -118,52 +119,55 @@ class DetectionRectsWranglerCSE:
         }
 
     def wrangle(self, outputs):
+        with record_function("wrangle_setup"):
+            extractor = DensePoseOutputsExtractor()
+            outputs, extracted_boxes_xywh, extracted_pred_classes, scores = extractor(outputs)
 
-        extractor = DensePoseOutputsExtractor()
-        outputs, extracted_boxes_xywh, extracted_pred_classes, scores = extractor(outputs)
-
-        S, E, N, bboxes_xywh, pred_classes = self.extract_and_check_outputs_and_boxes(
-            outputs, extracted_boxes_xywh, extracted_pred_classes
-        )
-        device = outputs.coarse_segm.device
-        truncate_vertex_index = 6980
+            S, E, N, bboxes_xywh, pred_classes = self.extract_and_check_outputs_and_boxes(
+                outputs, extracted_boxes_xywh, extracted_pred_classes
+            )
+            device = outputs.coarse_segm.device
+            truncate_vertex_index = 6980
 
         rects = []
         for n in range(N):
-            pred_bbox_yxhw = bboxes_xywh[n]
-            x, y, w, h = pred_bbox_yxhw.int().tolist()
-            if w == 0 or h == 0:
-                continue
-            mesh_name = self.class_to_mesh_name[pred_classes[n]]
-            mesh_vertex_embeddings = self.mesh_vertex_embeddings[mesh_name]
-            if truncate_vertex_index is not None:
-                mesh_vertex_embeddings = mesh_vertex_embeddings[:truncate_vertex_index]
-            closest_vertices, mask = get_closest_vertices_mask_from_ES_no_resize(
-                E[[n]],
-                S[[n]],
-                mesh_vertex_embeddings,
-                device,
-            )
-            #mask_numpy = mask.cpu().numpy().astype(dtype=np.uint8)
+            with record_function("wrangle_get embeddings"):
+                pred_bbox_yxhw = bboxes_xywh[n]
+                x, y, w, h = pred_bbox_yxhw.int().tolist()
+                if w == 0 or h == 0:
+                    continue
+                mesh_name = self.class_to_mesh_name[pred_classes[n]]
+                mesh_vertex_embeddings = self.mesh_vertex_embeddings[mesh_name]
+                if truncate_vertex_index is not None:
+                    mesh_vertex_embeddings = mesh_vertex_embeddings[:truncate_vertex_index]
+                closest_vertices, mask = get_closest_vertices_mask_from_ES_no_resize(
+                    E[[n]],
+                    S[[n]],
+                    mesh_vertex_embeddings,
+                    device,
+                )
+                #mask_numpy = mask.cpu().numpy().astype(dtype=np.uint8)
 
             for group in self.rects_config.smpl_6980_vertex_groups:
-                vertices = group['vertices']
-                name = group['name']
-                selected_vertices_mask = torch.isin(closest_vertices, torch.Tensor(vertices).to(device))
-                this_mask = mask * selected_vertices_mask
+                with record_function("wrangle_vtxgroup"):
 
-                this_rects_xyxy_list = find_rects_in_mask(pred_bbox_yxhw, this_mask.unsqueeze(0).to(torch.float32))
-                if len(this_rects_xyxy_list) > 0:
-                    this_rects_xyxy = torch.Tensor(this_rects_xyxy_list)
-                    w = this_rects_xyxy[:, 2] - this_rects_xyxy[:, 0]
-                    h = this_rects_xyxy[:, 3] - this_rects_xyxy[:, 1]
-                    area = w * h
-                    largest = area.argmax()
-                    rects.append({
-                        'label': name,
-                        'score': scores[n],
-                        'box': this_rects_xyxy_list[largest]
-                    })
+                    vertices = group['vertices']
+                    name = group['name']
+                    selected_vertices_mask = torch.isin(closest_vertices, torch.Tensor(vertices).to(device))
+                    this_mask = mask * selected_vertices_mask
+
+                    this_rects_xyxy_list = find_rects_in_mask(pred_bbox_yxhw, this_mask.unsqueeze(0).to(torch.float32))
+                    if len(this_rects_xyxy_list) > 0:
+                        this_rects_xyxy = torch.Tensor(this_rects_xyxy_list)
+                        w = this_rects_xyxy[:, 2] - this_rects_xyxy[:, 0]
+                        h = this_rects_xyxy[:, 3] - this_rects_xyxy[:, 1]
+                        area = w * h
+                        largest = area.argmax()
+                        rects.append({
+                            'label': name,
+                            'score': scores[n],
+                            'box': this_rects_xyxy_list[largest]
+                        })
 
 
         return rects
